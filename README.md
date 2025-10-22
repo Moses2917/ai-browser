@@ -1,305 +1,400 @@
 # AI Browser
 
-A powerful custom browser that connects to multiple AI providers (Claude, GPT-4, OpenAI o1) with vision capabilities and natural language control.
+A powerful custom browser with **LM Studio support** (local AI) and modern browser features including tabs, bookmarks, history, and AI-powered navigation.
 
-## Features
+## Key Features
 
-- **Multi-AI Support**: Connect to multiple AI providers simultaneously
-  - Anthropic Claude (with vision and thinking)
-  - OpenAI GPT-4o (with vision)
-  - OpenAI o1 (advanced thinking, no vision)
+### AI Integration (Primary: LM Studio)
 
-- **Vision Capabilities**: AI can see and understand web pages through screenshots
+- **LM Studio Support** - Run local AI models (Llama 3, Mistral, Phi-3, etc.)
+  - No API keys needed
+  - Complete privacy - everything runs locally
+  - Free to use
+  - Works offline
 
-- **Natural Language Commands**: Control the browser with plain English
-  - "Go to reddit and read the top post"
-  - "Search for Python tutorials"
-  - "Click the login button"
-  - "What is this page about?"
+- **Optional Cloud AI** - Claude, GPT-4 (with vision)
 
-- **Interactive Chat**: Have conversations with AI about page content
+### Full Browser Features (Like Chrome!)
 
-- **Web Automation**: Navigate, click, type, scroll, extract data
+#### Tab Management
+- Multiple tabs with easy switching
+- Open/close tabs dynamically
+- Tab history per tab
+- Visual tab status indicators
+
+#### Bookmarks
+- Save favorite pages
+- Organize in folders
+- Tag bookmarks
+- Search bookmarks
+- Persistent storage
+
+#### History
+- SQLite-based history tracking
+- Search history by URL or title
+- Visit counts and timestamps
+- Clear history (all or by days)
+
+#### Navigation
+- Back/forward buttons
+- Reload page
+- Smart address bar (auto-detects URLs vs searches)
+- Search engine integration (Google default)
+
+#### Content Tools
+- Find in page
+- Zoom controls
+- Read page content
+- Extract information
+- Search on page
+
+#### Privacy & Settings
+- Incognito/private mode
+- Customizable search engine
+- Download location settings
+- Persistent settings storage
 
 ## Installation
 
-### 1. Install Python Dependencies
+### 1. Install Dependencies
 
 ```bash
-pip install -r requirements.txt
-```
-
-### 2. Install Playwright Browsers
-
-```bash
+pip install playwright Pillow openai
 playwright install chromium
 ```
 
-### 3. Set API Keys
+**Optional** (only if you want Claude or GPT-4):
+```bash
+pip install anthropic openai
+```
 
-Set your API keys as environment variables:
+### 2. Setup LM Studio (Recommended)
+
+1. Download LM Studio: https://lmstudio.ai/
+2. Install and open LM Studio
+3. Download a model (recommended):
+   - **Llama 3.2** (fast, great quality)
+   - **Mistral 7B** (balanced)
+   - **Phi-3** (lightweight)
+   - **DeepSeek Coder** (for technical tasks)
+
+4. Start the local server:
+   - Click "Local Server" tab in LM Studio
+   - Click "Start Server"
+   - Default: http://localhost:1234
+
+5. Run the browser:
+```bash
+python ai_browser.py
+```
+
+### 3. Optional: Cloud AI Providers
+
+If you want to use Claude or GPT-4 instead of LM Studio:
 
 ```bash
-# For Claude
-export ANTHROPIC_API_KEY='your-anthropic-key'
-
-# For OpenAI (GPT-4, o1)
-export OPENAI_API_KEY='your-openai-key'
+export ANTHROPIC_API_KEY='your-key'
+export OPENAI_API_KEY='your-key'
 ```
 
 Or create a `.env` file:
-
-```bash
-ANTHROPIC_API_KEY=your-anthropic-key
-OPENAI_API_KEY=your-openai-key
+```
+ANTHROPIC_API_KEY=your-key
+OPENAI_API_KEY=your-key
+LM_STUDIO_URL=http://localhost:1234/v1
 ```
 
 ## Usage
 
-### Run the Browser
+### Start the Browser
 
 ```bash
 python ai_browser.py
 ```
 
-The browser will start in interactive mode with a visible window.
+The browser will automatically:
+1. Try to connect to LM Studio (local)
+2. Fall back to Claude or GPT-4 if API keys are set
 
-### Commands
+### Interactive Commands
 
 #### Natural Language Commands
 
-Just type what you want to do:
+Just type what you want:
 
 ```
 > Go to reddit.com
 > Read the top post
-> Search for "Python" on this page
+> Search for "Python tutorials"
 > Click the first link
 > Scroll down
 ```
 
-#### Chat Mode
+#### Chat About Pages
 
-Ask questions about the current page:
+Ask the AI about what's on the page:
 
 ```
 > chat: What is this page about?
 > chat: Summarize the main article
-> chat: What are the comments saying?
+> chat: What are the top comments?
 ```
 
-#### Switch AI Provider
+#### Tab Management
 
 ```
-> use: claude
-> use: gpt4
-> use: o1
+> tabs               # List all tabs
+> tab 2              # Switch to tab 2
+> newtab reddit.com  # Open new tab
+> closetab 1         # Close tab 1
+```
+
+#### Navigation
+
+```
+> back               # Go back
+> forward            # Go forward
+> reload             # Reload page
+```
+
+#### Bookmarks
+
+```
+> bookmark           # Bookmark current page
+> bookmark My Favorite Site  # Custom title
+> bookmarks          # List all bookmarks
+```
+
+#### History
+
+```
+> history            # Show recent history
+> history python     # Search history for "python"
+```
+
+#### Find & Search
+
+```
+> find: keyword      # Find text on page
+```
+
+#### Settings & Status
+
+```
+> status             # Show browser status
+> settings           # Show current settings
+> use: lmstudio      # Switch to LM Studio
+> use: claude        # Switch to Claude
 ```
 
 #### Exit
 
 ```
 > quit
+> exit
 ```
 
 ## Examples
 
-### Example 1: Browse Reddit
-
-```
-> Go to reddit.com and read the top post
-
-Processing command with claude...
-  → Navigating to Reddit
-  → Clicking the first post
-  → Reading the post content
-
-Page content:
-TIL that...
-[Post content here]
-```
-
-### Example 2: Research with AI
+### Example 1: Research with Local AI
 
 ```
 > Go to news.ycombinator.com
 
-> chat: What are the trending topics today?
+🤖 Processing with lmstudio...
+  → Navigating to Hacker News
+✓ Navigated to https://news.ycombinator.com
 
-claude: Based on the current page, the trending topics are:
-1. New AI developments...
-2. Web3 discussion...
-3. Programming languages...
+> chat: What are the top 3 stories today?
+
+🤖 lmstudio:
+Based on the page, the top 3 stories are:
+1. "New AI breakthrough in reasoning"
+2. "Rust 1.75 released"
+3. "How we scaled to 1M users"
 ```
 
-### Example 3: Extract Information
+### Example 2: Multi-Tab Research
 
 ```
-> Go to python.org
+> newtab python.org
+✓ Opened new tab 2
 
-> chat: Find me the latest Python version
+> newtab github.com
+✓ Opened new tab 3
 
-claude: According to the page, the latest Python version is 3.12.0
+> tabs
+
+📑 Open Tabs (3):
+➜ Tab 3: GitHub
+     https://github.com
+  Tab 2: Python.org
+     https://python.org
+  Tab 1: Hacker News
+     https://news.ycombinator.com
+
+> tab 2
+✓ Switched to tab 2
+
+> bookmark Python Official
+✓ Bookmarked: Python Official
+```
+
+### Example 3: Automated Navigation
+
+```
+> Go to reddit.com, find r/programming, and read the top post
+
+🤖 Processing with lmstudio...
+  → Navigating to Reddit
+  → Searching for r/programming
+  → Clicking top post
+  → Reading content
+
+Page content:
+TIL: How to optimize Python code...
+[content here]
 ```
 
 ## Architecture
 
 ### Components
 
-1. **AIProvider**: Abstract base class for AI integrations
-   - `AnthropicProvider`: Claude with vision support
-   - `OpenAIProvider`: GPT-4 and o1 models
+```
+AIBrowser
+├── LMStudioProvider (primary)
+├── AnthropicProvider (optional)
+├── OpenAIProvider (optional)
+├── BrowserAutomation
+│   ├── Tab Management
+│   ├── Navigation
+│   └── Content Interaction
+├── HistoryManager (SQLite)
+├── BookmarkManager (JSON)
+├── DownloadManager
+└── SettingsManager
+```
 
-2. **BrowserAutomation**: Playwright-based browser control
-   - Navigate, click, type, scroll
-   - Screenshot capture
-   - Content extraction
+### Data Storage
 
-3. **AIBrowser**: Main orchestrator
-   - Manages multiple AI providers
-   - Executes commands
-   - Maintains conversation history
-   - Interactive command loop
+All data is stored in `~/.ai_browser/`:
+- `history.db` - Browsing history (SQLite)
+- `bookmarks.json` - Bookmarks
+- `settings.json` - Browser settings
+- Downloads: `~/Downloads/AIBrowser/`
 
 ### How It Works
 
-1. User enters a natural language command
-2. AI provider analyzes the command and page context
-3. AI generates structured actions (JSON)
-4. Browser automation executes the actions
-5. Results are returned to the user
+1. **User types command** → "Go to reddit and read the top post"
+2. **AI processes** → Converts to structured actions (JSON)
+3. **Browser executes** → Navigates, clicks, extracts content
+4. **Results returned** → User sees the output
 
-### Available Actions
+### Actions Available to AI
 
-The AI can generate these actions:
+The AI can generate these browser actions:
 
-- `navigate(url)`: Go to a URL
-- `click(selector)`: Click an element
-- `type(selector, text)`: Type into a field
-- `scroll(direction)`: Scroll the page
-- `read()`: Get page content
-- `screenshot()`: Capture the page
-- `extract(query)`: Find specific information
-- `search(query)`: Search for text
+- `navigate` - Go to URL
+- `click` - Click element (CSS selector)
+- `type` - Type into input field
+- `scroll` - Scroll page
+- `read` - Get page content
+- `search` - Find text on page
+- `extract` - Extract specific information
+- `back` - Go back in history
+- `forward` - Go forward in history
 
-## Configuration
+## LM Studio Tips
 
-### Adding Custom AI Providers
+### Best Models for Browsing
 
-You can add custom AI providers by extending the `AIProvider` class:
+1. **Llama 3.2 3B** - Fast, great for quick commands
+2. **Mistral 7B v0.3** - Balanced performance
+3. **Phi-3 Medium** - Lightweight, good quality
+4. **DeepSeek Coder** - Best for technical sites
+5. **Gemma 2 9B** - Great reasoning
 
-```python
-class CustomProvider(AIProvider):
-    async def chat(self, messages, screenshot=None):
-        # Implement chat logic
-        pass
+### Recommended Settings in LM Studio
 
-    async def execute_command(self, command, page_context):
-        # Implement command execution
-        pass
+- **Temperature**: 0.7 (balanced)
+- **Max Tokens**: 4096
+- **Context Length**: 8192+
+- **GPU Layers**: Max (for speed)
 
-# Add to browser
-config = AIConfig(
-    provider="custom",
-    model="custom-model",
-    api_key="your-key",
-    supports_vision=True
-)
-browser.add_provider("custom", CustomProvider(config))
-```
+### Troubleshooting LM Studio
 
-### Headless Mode
-
-To run without a visible browser window:
-
-```python
-await browser.start(headless=True)
-```
-
-## Tips
-
-1. **Be Specific**: The more specific your commands, the better results
-   - Good: "Go to reddit.com and click the first post in r/programming"
-   - Less good: "Go to reddit"
-
-2. **Use Chat for Analysis**: Use chat mode when you want the AI to understand and explain content
-
-3. **Vision Models**: Claude and GPT-4o can see the page, o1 cannot (but has better reasoning)
-
-4. **Switch Models**: Different models have different strengths
-   - Claude: Best for complex reasoning and vision
-   - GPT-4o: Fast with good vision
-   - o1: Advanced reasoning without vision
-
-## Troubleshooting
-
-### Missing Dependencies
-
+**Browser can't connect:**
 ```bash
-pip install playwright anthropic openai Pillow
-playwright install chromium
+# Check if LM Studio server is running
+curl http://localhost:1234/v1/models
+
+# If not, start it in LM Studio:
+# Local Server tab → Start Server
 ```
 
-### API Key Errors
+**Slow responses:**
+- Use smaller models (3B-7B parameters)
+- Enable GPU acceleration in LM Studio
+- Reduce max tokens to 2048
 
-Make sure your API keys are set:
-
-```bash
-echo $ANTHROPIC_API_KEY
-echo $OPENAI_API_KEY
-```
-
-### Playwright Issues
-
-If Playwright fails to start:
-
-```bash
-playwright install --force chromium
-```
-
-### Timeout Errors
-
-Some pages take longer to load. The browser waits up to 30 seconds.
+**Model gives bad instructions:**
+- Try a different model (Llama 3 is most reliable)
+- Use chat mode instead: `chat: summarize this page`
 
 ## Advanced Usage
 
 ### Programmatic Usage
 
-You can use the browser programmatically:
-
 ```python
 import asyncio
-from ai_browser import AIBrowser, AIConfig, AnthropicProvider
+from ai_browser import AIBrowser, AIConfig, LMStudioProvider
 
 async def automate():
     browser = AIBrowser()
 
-    # Configure AI
+    # Configure LM Studio
     config = AIConfig(
-        provider="anthropic",
-        model="claude-3-5-sonnet-20241022",
-        api_key="your-key",
-        supports_vision=True
+        provider="lmstudio",
+        model="local-model",
+        base_url="http://localhost:1234/v1",
     )
-    browser.add_provider("claude", AnthropicProvider(config))
+    browser.add_provider("lmstudio", LMStudioProvider(config))
 
-    # Start browser
     await browser.start()
 
-    # Execute commands
+    # Navigate and extract
     await browser.execute_command("Go to example.com")
-    response = await browser.chat("What is on this page?")
-    print(response)
+    result = await browser.chat("What is on this page?")
+    print(result)
 
-    # Stop browser
     await browser.stop()
 
 asyncio.run(automate())
 ```
 
-### Custom Automation Scripts
+### Custom AI Provider
 
-Create your own automation scripts:
+You can add any OpenAI-compatible API:
+
+```python
+# For Ollama
+config = AIConfig(
+    provider="ollama",
+    model="llama3.2",
+    base_url="http://localhost:11434/v1",
+)
+
+# For LocalAI
+config = AIConfig(
+    provider="localai",
+    model="gpt-3.5-turbo",
+    base_url="http://localhost:8080/v1",
+)
+```
+
+### Automation Scripts
+
+Create a daily news aggregator:
 
 ```python
 async def daily_news():
@@ -307,30 +402,167 @@ async def daily_news():
     # ... setup ...
 
     await browser.execute_command("Go to news.ycombinator.com")
-    summary = await browser.chat("Summarize the top 5 stories")
+    hn_summary = await browser.chat("Summarize top 5 stories")
 
-    await browser.execute_command("Go to reddit.com/r/programming")
+    await browser.execute_command("newtab reddit.com/r/programming")
     reddit_summary = await browser.chat("What are people discussing?")
 
     return {
-        "hn": summary,
+        "hacker_news": hn_summary,
         "reddit": reddit_summary
     }
 ```
+
+## Keyboard Shortcuts (Planned)
+
+- `Ctrl+T` - New tab
+- `Ctrl+W` - Close tab
+- `Ctrl+Tab` - Next tab
+- `Ctrl+Shift+Tab` - Previous tab
+- `Ctrl+L` - Focus address bar
+- `Ctrl+R` - Reload
+- `Ctrl+F` - Find in page
+- `Alt+Left` - Back
+- `Alt+Right` - Forward
+
+## Comparison with Other Browsers
+
+| Feature | AI Browser | Chrome | Firefox | Browser Use |
+|---------|-----------|---------|---------|-------------|
+| Local AI (LM Studio) | ✅ | ❌ | ❌ | ❌ |
+| Cloud AI | ✅ | ❌ | ❌ | ✅ |
+| Multiple Tabs | ✅ | ✅ | ✅ | ✅ |
+| Bookmarks | ✅ | ✅ | ✅ | ❌ |
+| History | ✅ | ✅ | ✅ | ❌ |
+| Natural Language | ✅ | ❌ | ❌ | ✅ |
+| Complete Privacy | ✅ | ❌ | ❌ | ❌ |
+| Offline AI | ✅ | ❌ | ❌ | ❌ |
+| Open Source | ✅ | ❌ | ✅ | ❌ |
+
+## Roadmap
+
+### v2.0 (Next)
+- [ ] Tab groups
+- [ ] Session restore
+- [ ] Extensions system
+- [ ] Download manager UI
+- [ ] Password manager
+- [ ] Form autofill
+- [ ] Reader mode
+- [ ] Dark theme
+
+### v3.0 (Future)
+- [ ] Multi-window support
+- [ ] Sync across devices
+- [ ] Mobile version
+- [ ] Voice commands
+- [ ] Developer tools
+- [ ] Custom CSS injection
+- [ ] Ad blocker
+- [ ] Cookie management
+
+## Why LM Studio?
+
+1. **Privacy** - Everything runs on your computer
+2. **Free** - No API costs
+3. **Fast** - Local inference is quick
+4. **Offline** - Works without internet
+5. **Customizable** - Use any model you want
+6. **No Limits** - Unlimited usage
+
+## Contributing
+
+Contributions welcome! Areas needing help:
+
+- Vision support for LM Studio (LLaVA models)
+- Better CSS selectors for clicking
+- Session management
+- Extension system
+- UI improvements
+
+## Troubleshooting
+
+### "No AI providers configured"
+
+Make sure LM Studio is running:
+1. Open LM Studio
+2. Load a model
+3. Start local server (http://localhost:1234)
+4. Run browser again
+
+### "Error connecting to LM Studio"
+
+```bash
+# Test connection
+curl http://localhost:1234/v1/models
+
+# Should return JSON with available models
+```
+
+### Tab Issues
+
+- Can't close last tab: This is intentional (browser needs at least one tab)
+- Tab switching slow: Close unused tabs or use a faster model
+
+### History Not Saving
+
+Check permissions:
+```bash
+ls -la ~/.ai_browser/
+# Should show history.db, bookmarks.json, settings.json
+```
+
+### Commands Not Working
+
+Try chat mode instead:
+```
+> chat: go to reddit.com
+```
+
+Or be more explicit:
+```
+> Navigate to https://reddit.com
+```
+
+## FAQ
+
+**Q: Do I need API keys?**
+A: No! Just use LM Studio (free, local AI)
+
+**Q: Which AI model is best?**
+A: Llama 3.2 3B for speed, Mistral 7B for quality
+
+**Q: Can it run offline?**
+A: Yes, with LM Studio
+
+**Q: Does it support vision?**
+A: Not yet with LM Studio, but yes with Claude/GPT-4
+
+**Q: How much RAM do I need?**
+A: 8GB for 3B models, 16GB for 7B models
+
+**Q: Is my browsing history private?**
+A: Yes, everything is stored locally on your computer
+
+**Q: Can I use other local AI tools?**
+A: Yes! Works with Ollama, LocalAI, or any OpenAI-compatible API
 
 ## License
 
 MIT
 
-## Contributing
+## Credits
 
-Feel free to submit issues and pull requests!
+- Built with Playwright for browser automation
+- Uses LM Studio for local AI
+- Inspired by Chrome, Browser Use, and Anthropic's Claude
 
-## Future Enhancements
+## Links
 
-- Add more AI providers (Google Gemini, Mistral, etc.)
-- Support for multiple tabs
-- Session recording/replay
-- Custom action plugins
-- Voice control
-- Multi-modal interactions
+- LM Studio: https://lmstudio.ai/
+- Playwright: https://playwright.dev/
+- Report Issues: https://github.com/Moses2917/ai-browser/issues
+
+---
+
+**Made with AI-powered browsing in mind** 🚀

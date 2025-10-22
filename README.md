@@ -1,6 +1,41 @@
 # AI Browser
 
-A powerful custom browser with **LM Studio support** (local AI) and modern browser features including tabs, bookmarks, history, and AI-powered navigation.
+A powerful browser with **LM Studio support** (local AI) - Available in two versions:
+
+## 🖥️ GUI Version (NEW!) - `browser_gui.py`
+**Real browser with its own window!** Like Chrome or Brave but with AI built-in.
+- ✅ Real browser window with UI
+- ✅ Address bar, tabs, bookmarks
+- ✅ Uses Chromium rendering engine (QtWebEngine)
+- ✅ AI side panel
+- ✅ Full GUI interaction
+
+**Quick Start:**
+```bash
+pip install -r requirements_gui.txt
+python browser_gui.py
+```
+
+[See GUI Documentation →](README_GUI.md)
+
+## ⌨️ CLI Version - `ai_browser.py`
+**Command-line automation** - Control browser with natural language.
+- ✅ Natural language commands
+- ✅ AI-powered automation
+- ✅ Headless or visible mode
+- ✅ Advanced optimizations
+
+**Quick Start:**
+```bash
+pip install -r requirements.txt
+python ai_browser.py
+```
+
+---
+
+# Features Overview
+
+Both versions include:
 
 ## Key Features
 

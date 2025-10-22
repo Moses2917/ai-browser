@@ -1,0 +1,6 @@
+PyQt5>=5.15.0
+PyQtWebEngine>=5.15.0
+openai>=1.40.0
+
+# Optional for advanced features
+Pillow>=10.0.0

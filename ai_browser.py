@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-AI Browser - Advanced browser with LM Studio support and modern browser features
-Includes tabs, bookmarks, history, downloads, and AI-powered navigation
+AI Browser - Optimized browser with LM Studio support and modern features
+High-performance text rendering, caching, and memory management
 """
 
 import os
@@ -11,18 +11,21 @@ import base64
 import asyncio
 import re
 import sqlite3
-from datetime import datetime
-from typing import Optional, Dict, List, Any
+import time
+import hashlib
+from datetime import datetime, timedelta
+from typing import Optional, Dict, List, Any, Tuple
 from dataclasses import dataclass, field, asdict
 from abc import ABC, abstractmethod
 from io import BytesIO
 from pathlib import Path
 from urllib.parse import urlparse, quote_plus
+from functools import lru_cache
+from collections import OrderedDict
 
 try:
     from playwright.async_api import async_playwright, Page, Browser, BrowserContext
     from PIL import Image
-    # Make optional - not everyone needs these
     try:
         import anthropic
     except ImportError:
@@ -43,11 +46,59 @@ except ImportError as e:
 # Configuration
 DATA_DIR = Path.home() / ".ai_browser"
 DATA_DIR.mkdir(exist_ok=True)
+CACHE_DIR = DATA_DIR / "cache"
+CACHE_DIR.mkdir(exist_ok=True)
 BOOKMARKS_FILE = DATA_DIR / "bookmarks.json"
 HISTORY_DB = DATA_DIR / "history.db"
 SETTINGS_FILE = DATA_DIR / "settings.json"
 DOWNLOADS_DIR = Path.home() / "Downloads" / "AIBrowser"
 DOWNLOADS_DIR.mkdir(parents=True, exist_ok=True)
+
+# Performance settings
+MAX_CONTENT_LENGTH = 50000  # Max chars to extract from page
+CHUNK_SIZE = 5000  # Size of text chunks
+MAX_CACHE_SIZE = 100  # Max cached pages
+MAX_TABS = 20  # Max open tabs
+SCREENSHOT_MAX_SIZE = (800, 600)  # Smaller for speed
+CACHE_TTL = 3600  # Cache time-to-live (1 hour)
+
+
+@dataclass
+class PerformanceMetrics:
+    """Track performance metrics"""
+    page_load_time: float = 0.0
+    content_extract_time: float = 0.0
+    ai_response_time: float = 0.0
+    screenshot_time: float = 0.0
+    cache_hits: int = 0
+    cache_misses: int = 0
+
+    def reset(self):
+        self.__init__()
+
+
+@dataclass
+class ContentChunk:
+    """Text content chunk for efficient processing"""
+    text: str
+    start: int
+    end: int
+    type: str = "body"  # body, header, article, etc.
+
+
+@dataclass
+class CachedPage:
+    """Cached page content"""
+    url: str
+    title: str
+    content: str
+    summary: Optional[str]
+    screenshot: Optional[bytes]
+    timestamp: float
+    headers: Dict[str, str] = field(default_factory=dict)
+
+    def is_expired(self, ttl: int = CACHE_TTL) -> bool:
+        return (time.time() - self.timestamp) > ttl
 
 
 @dataclass
@@ -55,8 +106,8 @@ class AIConfig:
     """Configuration for AI providers"""
     provider: str
     model: str
-    base_url: str = ""  # For LM Studio and local models
-    api_key: str = "not-needed"  # LM Studio doesn't need key
+    base_url: str = ""
+    api_key: str = "not-needed"
     supports_vision: bool = False
     supports_thinking: bool = False
     max_tokens: int = 4096
@@ -65,7 +116,7 @@ class AIConfig:
 
 @dataclass
 class Tab:
-    """Browser tab"""
+    """Browser tab with memory management"""
     id: int
     title: str = "New Tab"
     url: str = ""
@@ -74,13 +125,20 @@ class Tab:
     history_index: int = -1
     zoom_level: float = 1.0
     is_loading: bool = False
+    is_suspended: bool = False  # Memory optimization
+    last_accessed: float = field(default_factory=time.time)
     favicon: Optional[str] = None
+    memory_estimate: int = 0  # Estimated memory usage in KB
 
     def can_go_back(self) -> bool:
         return self.history_index > 0
 
     def can_go_forward(self) -> bool:
         return self.history_index < len(self.history) - 1
+
+    def touch(self):
+        """Update last accessed time"""
+        self.last_accessed = time.time()
 
 
 @dataclass
@@ -115,8 +173,157 @@ class Settings:
     private_mode: bool = False
     block_popups: bool = True
     enable_javascript: bool = True
+    enable_cache: bool = True
+    enable_lazy_loading: bool = True
+    max_content_length: int = MAX_CONTENT_LENGTH
     user_agent: str = ""
     theme: str = "light"
+
+
+class ContentExtractor:
+    """Intelligent content extraction - avoid wall of text"""
+
+    @staticmethod
+    async def extract_smart_content(page: Page, max_length: int = MAX_CONTENT_LENGTH) -> Tuple[str, str]:
+        """
+        Extract meaningful content intelligently
+        Returns (full_content, summary)
+        """
+        try:
+            # Extract structured content using JavaScript
+            result = await page.evaluate("""() => {
+                // Helper to get text from elements
+                function getText(selector) {
+                    const elements = document.querySelectorAll(selector);
+                    return Array.from(elements).map(e => e.innerText.trim()).filter(t => t.length > 0);
+                }
+
+                // Extract different content types
+                const content = {
+                    title: document.title || '',
+                    h1: getText('h1'),
+                    h2: getText('h2'),
+                    h3: getText('h3'),
+                    article: getText('article p, article div'),
+                    main: getText('main p, main div'),
+                    paragraphs: getText('p'),
+                    lists: getText('li'),
+                    meta: {
+                        description: document.querySelector('meta[name="description"]')?.content || '',
+                        keywords: document.querySelector('meta[name="keywords"]')?.content || ''
+                    }
+                };
+
+                return content;
+            }""")
+
+            # Build structured content
+            parts = []
+
+            # Title
+            if result.get('title'):
+                parts.append(f"TITLE: {result['title']}\n")
+
+            # Meta description
+            if result.get('meta', {}).get('description'):
+                parts.append(f"DESCRIPTION: {result['meta']['description']}\n")
+
+            # Headings (limited)
+            if result.get('h1'):
+                parts.append(f"MAIN HEADINGS:\n" + "\n".join(result['h1'][:5]) + "\n")
+
+            # Main content (prioritize article/main over general paragraphs)
+            main_text = []
+
+            if result.get('article'):
+                main_text = result['article'][:20]  # First 20 paragraphs from article
+            elif result.get('main'):
+                main_text = result['main'][:20]
+            else:
+                main_text = result.get('paragraphs', [])[:15]  # First 15 general paragraphs
+
+            if main_text:
+                parts.append(f"CONTENT:\n" + "\n\n".join(main_text))
+
+            # Combine
+            full_content = "\n".join(parts)
+
+            # Truncate if too long
+            if len(full_content) > max_length:
+                full_content = full_content[:max_length] + f"\n\n[Content truncated - {len(full_content) - max_length} more characters available]"
+
+            # Create summary (first 1000 chars)
+            summary = full_content[:1000] + "..." if len(full_content) > 1000 else full_content
+
+            return full_content, summary
+
+        except Exception as e:
+            # Fallback to simple text extraction
+            try:
+                simple_text = await page.evaluate("() => document.body.innerText")
+                if len(simple_text) > max_length:
+                    simple_text = simple_text[:max_length] + "\n[Content truncated]"
+                summary = simple_text[:1000] + "..." if len(simple_text) > 1000 else simple_text
+                return simple_text, summary
+            except:
+                return f"Error extracting content: {str(e)}", ""
+
+    @staticmethod
+    def chunk_content(content: str, chunk_size: int = CHUNK_SIZE) -> List[ContentChunk]:
+        """Split content into manageable chunks"""
+        chunks = []
+        for i in range(0, len(content), chunk_size):
+            chunk = ContentChunk(
+                text=content[i:i + chunk_size],
+                start=i,
+                end=min(i + chunk_size, len(content))
+            )
+            chunks.append(chunk)
+        return chunks
+
+
+class PageCache:
+    """LRU cache for page content"""
+
+    def __init__(self, max_size: int = MAX_CACHE_SIZE):
+        self.cache: OrderedDict[str, CachedPage] = OrderedDict()
+        self.max_size = max_size
+
+    def _get_key(self, url: str) -> str:
+        """Generate cache key"""
+        return hashlib.md5(url.encode()).hexdigest()
+
+    def get(self, url: str) -> Optional[CachedPage]:
+        """Get cached page"""
+        key = self._get_key(url)
+        if key in self.cache:
+            page = self.cache[key]
+            if not page.is_expired():
+                # Move to end (most recently used)
+                self.cache.move_to_end(key)
+                return page
+            else:
+                # Expired, remove
+                del self.cache[key]
+        return None
+
+    def put(self, url: str, page: CachedPage):
+        """Cache a page"""
+        key = self._get_key(url)
+
+        # Remove oldest if at capacity
+        if len(self.cache) >= self.max_size:
+            self.cache.popitem(last=False)
+
+        self.cache[key] = page
+
+    def clear(self):
+        """Clear cache"""
+        self.cache.clear()
+
+    def size(self) -> int:
+        """Get cache size"""
+        return len(self.cache)
 
 
 class AIProvider(ABC):
@@ -128,14 +335,27 @@ class AIProvider(ABC):
     @abstractmethod
     async def chat(self, messages: List[Dict[str, Any]],
                    screenshot: Optional[bytes] = None) -> str:
-        """Send chat message and get response"""
         pass
 
     @abstractmethod
-    async def execute_command(self, command: str,
-                             tab: Tab) -> Dict[str, Any]:
-        """Execute a natural language command"""
+    async def execute_command(self, command: str, tab: Tab) -> Dict[str, Any]:
         pass
+
+    async def summarize_content(self, content: str, max_length: int = 500) -> str:
+        """Summarize long content"""
+        if len(content) <= max_length:
+            return content
+
+        messages = [
+            {"role": "system", "content": "Summarize the following content concisely."},
+            {"role": "user", "content": f"Summarize this in {max_length} chars or less:\n\n{content[:5000]}"}
+        ]
+
+        try:
+            return await self.chat(messages)
+        except:
+            # Fallback to simple truncation
+            return content[:max_length] + "..."
 
 
 class LMStudioProvider(AIProvider):
@@ -146,18 +366,16 @@ class LMStudioProvider(AIProvider):
         if openai is None:
             raise ImportError("openai package required for LM Studio. Install with: pip install openai")
 
-        # LM Studio default endpoint
         base_url = config.base_url or "http://localhost:1234/v1"
         self.client = openai.AsyncOpenAI(
             base_url=base_url,
-            api_key="lm-studio"  # LM Studio doesn't validate this
+            api_key="lm-studio"
         )
 
     async def chat(self, messages: List[Dict[str, Any]],
                    screenshot: Optional[bytes] = None) -> str:
         """Send chat message to LM Studio"""
 
-        # LM Studio supports OpenAI format
         formatted_messages = []
         for msg in messages:
             content = msg["content"] if isinstance(msg["content"], str) else str(msg["content"])
@@ -231,9 +449,7 @@ Respond ONLY with valid JSON action(s)."""
 
         response = await self.chat(messages)
 
-        # Parse JSON response
         try:
-            # Extract JSON from response
             json_match = re.search(r'\{.*\}|\[.*\]', response, re.DOTALL)
             if json_match:
                 return json.loads(json_match.group())
@@ -304,7 +520,6 @@ class AnthropicProvider(AIProvider):
 
     async def execute_command(self, command: str, tab: Tab) -> Dict[str, Any]:
         """Execute command using Claude"""
-        # Similar implementation to LMStudioProvider
         system_prompt = """You are an AI browser assistant. Respond with JSON actions."""
 
         messages = [
@@ -377,14 +592,14 @@ class OpenAIProvider(AIProvider):
 
 
 class HistoryManager:
-    """Manage browsing history with SQLite"""
+    """Manage browsing history with SQLite - optimized queries"""
 
     def __init__(self, db_path: Path = HISTORY_DB):
         self.db_path = db_path
         self.init_db()
 
     def init_db(self):
-        """Initialize history database"""
+        """Initialize history database with optimized schema"""
         conn = sqlite3.connect(self.db_path)
         conn.execute("""
             CREATE TABLE IF NOT EXISTS history (
@@ -395,43 +610,39 @@ class HistoryManager:
                 visit_count INTEGER DEFAULT 1
             )
         """)
+        # Optimized indexes
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_url ON history(url)
         """)
         conn.execute("""
             CREATE INDEX IF NOT EXISTS idx_time ON history(visit_time DESC)
         """)
+        conn.execute("""
+            CREATE INDEX IF NOT EXISTS idx_title ON history(title)
+        """)
         conn.commit()
         conn.close()
 
     def add_visit(self, url: str, title: str):
-        """Add or update history entry"""
+        """Add or update history entry - optimized with UPSERT"""
         if not url or url.startswith('about:') or url.startswith('chrome:'):
             return
 
         conn = sqlite3.connect(self.db_path)
-        # Check if URL exists
-        cursor = conn.execute("SELECT id, visit_count FROM history WHERE url = ?", (url,))
-        row = cursor.fetchone()
-
-        if row:
-            # Update visit count and time
-            conn.execute(
-                "UPDATE history SET visit_count = visit_count + 1, visit_time = CURRENT_TIMESTAMP, title = ? WHERE id = ?",
-                (title, row[0])
-            )
-        else:
-            # Insert new entry
-            conn.execute(
-                "INSERT INTO history (url, title) VALUES (?, ?)",
-                (url, title)
-            )
-
+        # Use INSERT OR REPLACE for efficiency
+        conn.execute("""
+            INSERT INTO history (url, title, visit_count, visit_time)
+            VALUES (?, ?, 1, CURRENT_TIMESTAMP)
+            ON CONFLICT(url) DO UPDATE SET
+                visit_count = visit_count + 1,
+                visit_time = CURRENT_TIMESTAMP,
+                title = excluded.title
+        """, (url, title))
         conn.commit()
         conn.close()
 
     def search_history(self, query: str, limit: int = 50) -> List[Dict]:
-        """Search history by URL or title"""
+        """Search history by URL or title - optimized query"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.execute("""
             SELECT url, title, visit_time, visit_count
@@ -454,8 +665,26 @@ class HistoryManager:
         return results
 
     def get_recent(self, limit: int = 100) -> List[Dict]:
-        """Get recent history"""
-        return self.search_history("", limit)
+        """Get recent history - optimized"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.execute("""
+            SELECT url, title, visit_time, visit_count
+            FROM history
+            ORDER BY visit_time DESC
+            LIMIT ?
+        """, (limit,))
+
+        results = []
+        for row in cursor.fetchall():
+            results.append({
+                "url": row[0],
+                "title": row[1],
+                "visit_time": row[2],
+                "visit_count": row[3]
+            })
+
+        conn.close()
+        return results
 
     def clear_history(self, days: Optional[int] = None):
         """Clear history (all or by days)"""
@@ -589,7 +818,7 @@ class SettingsManager:
 
 
 class BrowserAutomation:
-    """Enhanced browser automation with tabs"""
+    """Enhanced browser automation with optimizations"""
 
     def __init__(self, settings: Settings):
         self.browser: Optional[Browser] = None
@@ -599,13 +828,14 @@ class BrowserAutomation:
         self.tabs: List[Tab] = []
         self.active_tab_id: Optional[int] = None
         self.tab_id_counter = 0
+        self.cache = PageCache() if settings.enable_cache else None
+        self.metrics = PerformanceMetrics()
 
     async def start(self, headless: bool = False):
         """Start the browser"""
         self.playwright = await async_playwright().start()
         self.browser = await self.playwright.chromium.launch(headless=headless)
 
-        # Create context with settings
         context_options = {
             "viewport": {"width": 1920, "height": 1080},
             "accept_downloads": True
@@ -614,12 +844,7 @@ class BrowserAutomation:
         if self.settings.user_agent:
             context_options["user_agent"] = self.settings.user_agent
 
-        if self.settings.private_mode:
-            # Incognito mode
-            self.context = await self.browser.new_context(**context_options)
-        else:
-            # Normal mode with persistence
-            self.context = await self.browser.new_context(**context_options)
+        self.context = await self.browser.new_context(**context_options)
 
         # Create first tab
         await self.new_tab()
@@ -635,6 +860,11 @@ class BrowserAutomation:
 
     async def new_tab(self, url: str = "") -> Tab:
         """Create a new tab"""
+        # Check max tabs limit
+        if len(self.tabs) >= MAX_TABS:
+            # Suspend oldest inactive tab
+            await self.suspend_oldest_tab()
+
         self.tab_id_counter += 1
         page = await self.context.new_page()
 
@@ -647,6 +877,34 @@ class BrowserAutomation:
 
         return tab
 
+    async def suspend_oldest_tab(self):
+        """Suspend oldest inactive tab to save memory"""
+        if len(self.tabs) <= 1:
+            return
+
+        # Find oldest non-active tab
+        inactive_tabs = [t for t in self.tabs if t.id != self.active_tab_id and not t.is_suspended]
+        if not inactive_tabs:
+            return
+
+        oldest = min(inactive_tabs, key=lambda t: t.last_accessed)
+        oldest.is_suspended = True
+        if oldest.page:
+            await oldest.page.close()
+            oldest.page = None
+        print(f"⏸️  Suspended tab {oldest.id} to save memory")
+
+    async def resume_tab(self, tab: Tab):
+        """Resume a suspended tab"""
+        if not tab.is_suspended:
+            return
+
+        tab.page = await self.context.new_page()
+        if tab.url:
+            await tab.page.goto(tab.url, wait_until="domcontentloaded")
+        tab.is_suspended = False
+        print(f"▶️  Resumed tab {tab.id}")
+
     async def close_tab(self, tab_id: int):
         """Close a tab"""
         tab = self.get_tab(tab_id)
@@ -654,7 +912,6 @@ class BrowserAutomation:
             await tab.page.close()
             self.tabs = [t for t in self.tabs if t.id != tab_id]
 
-            # Switch to another tab if we closed the active one
             if self.active_tab_id == tab_id and self.tabs:
                 self.active_tab_id = self.tabs[-1].id
 
@@ -672,41 +929,75 @@ class BrowserAutomation:
         """Switch to a tab"""
         if any(t.id == tab_id for t in self.tabs):
             self.active_tab_id = tab_id
+            tab = self.get_tab(tab_id)
+            if tab:
+                tab.touch()
 
     async def navigate(self, url: str, tab: Optional[Tab] = None) -> Tab:
-        """Navigate to a URL"""
+        """Navigate to a URL with caching"""
         if tab is None:
             tab = self.get_tab()
 
-        if not tab or not tab.page:
+        if not tab:
             raise ValueError("No active tab")
+
+        # Resume if suspended
+        if tab.is_suspended:
+            await self.resume_tab(tab)
+
+        tab.touch()
 
         # Add protocol if missing
         if not url.startswith(('http://', 'https://', 'about:', 'file://')):
-            # Check if it's a search query or URL
             if ' ' in url or '.' not in url:
-                # It's a search query
                 url = self.settings.default_search_engine + quote_plus(url)
             else:
                 url = 'https://' + url
 
+        # Check cache first
+        if self.cache and self.settings.enable_cache:
+            cached = self.cache.get(url)
+            if cached:
+                self.metrics.cache_hits += 1
+                tab.url = url
+                tab.title = cached.title
+                print(f"⚡ Loaded from cache: {url}")
+                return tab
+            else:
+                self.metrics.cache_misses += 1
+
         tab.is_loading = True
+        start_time = time.time()
 
         try:
             await tab.page.goto(url, wait_until="domcontentloaded", timeout=30000)
 
-            # Update tab info
             tab.url = tab.page.url
             tab.title = await tab.page.title()
             tab.is_loading = False
 
+            self.metrics.page_load_time = time.time() - start_time
+
             # Update history
             if tab.history_index < len(tab.history) - 1:
-                # Clear forward history if we navigated from middle
                 tab.history = tab.history[:tab.history_index + 1]
 
             tab.history.append(tab.url)
             tab.history_index = len(tab.history) - 1
+
+            # Cache the page
+            if self.cache and self.settings.enable_cache:
+                content, summary = await self.get_smart_content(tab)
+                screenshot = await self.get_screenshot(tab)
+                cached_page = CachedPage(
+                    url=tab.url,
+                    title=tab.title,
+                    content=content,
+                    summary=summary,
+                    screenshot=screenshot,
+                    timestamp=time.time()
+                )
+                self.cache.put(tab.url, cached_page)
 
         except Exception as e:
             tab.is_loading = False
@@ -721,11 +1012,15 @@ class BrowserAutomation:
             tab = self.get_tab()
 
         if tab and tab.can_go_back():
+            if tab.is_suspended:
+                await self.resume_tab(tab)
+
             tab.history_index -= 1
             url = tab.history[tab.history_index]
             await tab.page.goto(url)
             tab.url = url
             tab.title = await tab.page.title()
+            tab.touch()
 
     async def go_forward(self, tab: Optional[Tab] = None):
         """Go forward in history"""
@@ -733,11 +1028,15 @@ class BrowserAutomation:
             tab = self.get_tab()
 
         if tab and tab.can_go_forward():
+            if tab.is_suspended:
+                await self.resume_tab(tab)
+
             tab.history_index += 1
             url = tab.history[tab.history_index]
             await tab.page.goto(url)
             tab.url = url
             tab.title = await tab.page.title()
+            tab.touch()
 
     async def reload(self, tab: Optional[Tab] = None, force: bool = False):
         """Reload the page"""
@@ -745,72 +1044,63 @@ class BrowserAutomation:
             tab = self.get_tab()
 
         if tab and tab.page:
-            if force:
-                await tab.page.reload()
-            else:
-                await tab.page.reload()
+            if tab.is_suspended:
+                await self.resume_tab(tab)
 
-    async def stop_loading(self, tab: Optional[Tab] = None):
-        """Stop page loading"""
+            await tab.page.reload()
+            tab.touch()
+
+            # Clear cache for this URL if force reload
+            if force and self.cache:
+                key = self.cache._get_key(tab.url)
+                if key in self.cache.cache:
+                    del self.cache.cache[key]
+
+    async def get_smart_content(self, tab: Optional[Tab] = None) -> Tuple[str, str]:
+        """Get page content intelligently - optimized extraction"""
         if tab is None:
             tab = self.get_tab()
 
-        if tab and tab.page and tab.is_loading:
-            # Playwright doesn't have a stop method, so we navigate to about:blank
-            # In practice, most pages will finish loading quickly
-            tab.is_loading = False
+        if not tab or not tab.page or tab.is_suspended:
+            return "", ""
 
-    async def set_zoom(self, level: float, tab: Optional[Tab] = None):
-        """Set zoom level"""
-        if tab is None:
-            tab = self.get_tab()
+        start_time = time.time()
 
-        if tab and tab.page:
-            tab.zoom_level = level
-            # This is a simple zoom by changing viewport
-            # For proper zoom, you'd need to inject CSS or use browser devtools protocol
+        content, summary = await ContentExtractor.extract_smart_content(
+            tab.page,
+            self.settings.max_content_length
+        )
 
-    async def find_in_page(self, query: str, tab: Optional[Tab] = None) -> List[str]:
-        """Find text in page"""
-        if tab is None:
-            tab = self.get_tab()
+        self.metrics.content_extract_time = time.time() - start_time
 
-        if not tab or not tab.page:
-            return []
-
-        # Use JavaScript to find text
-        content = await tab.page.content()
-        lines = content.split('\n')
-        matches = [line for line in lines if query.lower() in line.lower()]
-        return matches[:20]  # Return first 20 matches
+        return content, summary
 
     async def get_content(self, tab: Optional[Tab] = None) -> str:
-        """Get page text content"""
-        if tab is None:
-            tab = self.get_tab()
-
-        if not tab or not tab.page:
-            return ""
-
-        return await tab.page.evaluate("() => document.body.innerText")
+        """Get page content"""
+        content, _ = await self.get_smart_content(tab)
+        return content
 
     async def get_screenshot(self, tab: Optional[Tab] = None) -> bytes:
-        """Take a screenshot"""
+        """Take optimized screenshot"""
         if tab is None:
             tab = self.get_tab()
 
-        if not tab or not tab.page:
+        if not tab or not tab.page or tab.is_suspended:
             return b""
+
+        start_time = time.time()
 
         screenshot = await tab.page.screenshot(full_page=False, type="png")
 
-        # Compress for AI
+        # Aggressive compression
         image = Image.open(BytesIO(screenshot))
-        max_size = (1280, 720)
-        image.thumbnail(max_size, Image.Resampling.LANCZOS)
+        image.thumbnail(SCREENSHOT_MAX_SIZE, Image.Resampling.LANCZOS)
 
         output = BytesIO()
-        image.save(output, format='PNG', optimize=True)
+        image.save(output, format='PNG', optimize=True, quality=70)
+
+        self.metrics.screenshot_time = time.time() - start_time
+
         return output.getvalue()
 
     async def click(self, selector: str, tab: Optional[Tab] = None):
@@ -818,37 +1108,60 @@ class BrowserAutomation:
         if tab is None:
             tab = self.get_tab()
 
-        if tab and tab.page:
-            await tab.page.click(selector, timeout=10000)
+        if tab:
+            if tab.is_suspended:
+                await self.resume_tab(tab)
+            if tab.page:
+                await tab.page.click(selector, timeout=10000)
+                tab.touch()
 
     async def type_text(self, selector: str, text: str, tab: Optional[Tab] = None):
         """Type text into an input"""
         if tab is None:
             tab = self.get_tab()
 
-        if tab and tab.page:
-            await tab.page.fill(selector, text)
+        if tab:
+            if tab.is_suspended:
+                await self.resume_tab(tab)
+            if tab.page:
+                await tab.page.fill(selector, text)
+                tab.touch()
 
     async def scroll(self, direction: str = "down", amount: int = 500, tab: Optional[Tab] = None):
         """Scroll the page"""
         if tab is None:
             tab = self.get_tab()
 
-        if tab and tab.page:
-            if direction == "down":
-                await tab.page.evaluate(f"window.scrollBy(0, {amount})")
-            else:
-                await tab.page.evaluate(f"window.scrollBy(0, -{amount})")
+        if tab:
+            if tab.is_suspended:
+                await self.resume_tab(tab)
+            if tab.page:
+                if direction == "down":
+                    await tab.page.evaluate(f"window.scrollBy(0, {amount})")
+                else:
+                    await tab.page.evaluate(f"window.scrollBy(0, -{amount})")
+                tab.touch()
+
+    async def find_in_page(self, query: str, tab: Optional[Tab] = None) -> List[str]:
+        """Find text in page"""
+        if tab is None:
+            tab = self.get_tab()
+
+        if not tab or not tab.page or tab.is_suspended:
+            return []
+
+        content = await self.get_content(tab)
+        lines = content.split('\n')
+        matches = [line for line in lines if query.lower() in line.lower()]
+        return matches[:20]
 
     async def search_text(self, query: str, tab: Optional[Tab] = None) -> List[str]:
         """Search for text on the page"""
-        content = await self.get_content(tab)
-        lines = content.split('\n')
-        return [line.strip() for line in lines if query.lower() in line.lower()][:20]
+        return await self.find_in_page(query, tab)
 
 
 class AIBrowser:
-    """Main AI Browser with full features"""
+    """Main AI Browser with optimizations"""
 
     def __init__(self):
         self.settings_manager = SettingsManager()
@@ -880,6 +1193,7 @@ class AIBrowser:
         await self.browser.start(headless=headless)
         print("✓ Browser started!")
         print(f"  Mode: {'Private' if self.settings_manager.settings.private_mode else 'Normal'}")
+        print(f"  Cache: {'Enabled' if self.settings_manager.settings.enable_cache else 'Disabled'}")
 
     async def stop(self):
         """Stop the browser"""
@@ -931,9 +1245,9 @@ class AIBrowser:
                 return f"✓ Scrolled {direction}"
 
             elif action_type == "read":
-                content = await self.browser.get_content(tab)
-                preview = content[:2000] + "..." if len(content) > 2000 else content
-                return f"Page content:\n{preview}"
+                content, summary = await self.browser.get_smart_content(tab)
+                # Return summary instead of full content
+                return f"Page summary:\n{summary}\n\n[Full content: {len(content)} characters]"
 
             elif action_type == "search":
                 results = await self.browser.search_text(params.get("query", ""), tab)
@@ -961,11 +1275,12 @@ class AIBrowser:
             return "✗ No active tab"
 
         print(f"\n🤖 Processing with {self.current_provider}...")
+        start_time = time.time()
 
-        # Get command plan from AI
         actions = await provider.execute_command(command, tab)
 
-        # Handle both single action and multiple actions
+        self.browser.metrics.ai_response_time = time.time() - start_time
+
         if isinstance(actions, dict):
             actions = [actions]
 
@@ -990,14 +1305,15 @@ class AIBrowser:
         if not tab:
             return "✗ No active tab"
 
-        content = await self.browser.get_content(tab)
+        # Get smart content (summary not full text)
+        content, summary = await self.browser.get_smart_content(tab)
 
         context_msg = f"""Current page:
 URL: {tab.url}
 Title: {tab.title}
 
-Content preview:
-{content[:1000] if content else 'No content'}
+Content summary:
+{summary}
 
 User: {message}"""
 
@@ -1006,67 +1322,70 @@ User: {message}"""
             "content": context_msg
         })
 
-        # Get screenshot if vision is supported
         screenshot = None
         if include_vision and provider.config.supports_vision:
             screenshot = await self.browser.get_screenshot(tab)
 
+        start_time = time.time()
         response = await provider.chat(self.conversation_history, screenshot)
+        self.browser.metrics.ai_response_time = time.time() - start_time
 
         self.conversation_history.append({
             "role": "assistant",
             "content": response
         })
 
-        # Keep history manageable
         if len(self.conversation_history) > 20:
             self.conversation_history = self.conversation_history[-20:]
 
         return response
 
     def show_status(self):
-        """Show browser status"""
+        """Show browser status with performance metrics"""
         print("\n" + "="*60)
         print("AI BROWSER STATUS")
         print("="*60)
 
-        # AI Provider
         print(f"\n🤖 AI Provider: {self.current_provider}")
         print(f"   Available: {', '.join(self.ai_providers.keys())}")
 
-        # Tabs
         print(f"\n📑 Tabs ({len(self.browser.tabs)}):")
         for tab in self.browser.tabs:
             active = "  ➜" if tab.id == self.browser.active_tab_id else "   "
             loading = " [Loading...]" if tab.is_loading else ""
-            print(f"{active} Tab {tab.id}: {tab.title[:40]}{loading}")
+            suspended = " [Suspended]" if tab.is_suspended else ""
+            print(f"{active} Tab {tab.id}: {tab.title[:40]}{loading}{suspended}")
             print(f"      {tab.url[:60]}")
 
-        # Bookmarks
         print(f"\n⭐ Bookmarks: {len(self.bookmarks.bookmarks)}")
         folders = self.bookmarks.get_folders()
         if folders:
             print(f"   Folders: {', '.join(folders)}")
 
-        # History
         recent = self.history.get_recent(5)
-        print(f"\n📜 Recent History ({len(recent)} total):")
-        for item in recent[:3]:
-            print(f"   • {item['title'][:40]}")
-            print(f"     {item['url'][:60]}")
+        print(f"\n📜 Recent History: {len(recent)} entries")
 
-        # Settings
+        if self.browser.cache:
+            print(f"\n💾 Cache: {self.browser.cache.size()}/{MAX_CACHE_SIZE} pages")
+            print(f"   Hits: {self.browser.metrics.cache_hits} | Misses: {self.browser.metrics.cache_misses}")
+
+        print(f"\n⚡ Performance:")
+        print(f"   Page Load: {self.browser.metrics.page_load_time:.2f}s")
+        print(f"   Content Extract: {self.browser.metrics.content_extract_time:.3f}s")
+        print(f"   AI Response: {self.browser.metrics.ai_response_time:.2f}s")
+        print(f"   Screenshot: {self.browser.metrics.screenshot_time:.3f}s")
+
         print(f"\n⚙️  Settings:")
         print(f"   Mode: {'🔒 Private' if self.settings_manager.settings.private_mode else '🌐 Normal'}")
-        print(f"   Search: {self.settings_manager.settings.default_search_engine[:40]}")
-        print(f"   Downloads: {self.settings_manager.settings.download_location[:40]}")
+        print(f"   Cache: {'✓ Enabled' if self.settings_manager.settings.enable_cache else '✗ Disabled'}")
+        print(f"   Max Content: {self.settings_manager.settings.max_content_length} chars")
 
         print("\n" + "="*60)
 
     async def interactive_mode(self):
         """Run interactive command mode"""
         print("\n" + "="*70)
-        print("🌐 AI BROWSER - Interactive Mode")
+        print("🌐 AI BROWSER - Optimized Edition")
         print("="*70)
 
         self.show_status()
@@ -1084,7 +1403,8 @@ User: {message}"""
         print("  bookmarks         - List bookmarks")
         print("  history [query]   - Search history")
         print("  find: <text>      - Find in page")
-        print("  status            - Show status")
+        print("  status            - Show status with metrics")
+        print("  cache clear       - Clear page cache")
         print("  use: <provider>   - Switch AI provider")
         print("  settings          - Show/edit settings")
         print("  quit / exit       - Exit browser")
@@ -1099,22 +1419,26 @@ User: {message}"""
                 if not user_input:
                     continue
 
-                # Exit commands
                 if user_input.lower() in ['quit', 'exit', 'q']:
                     print("👋 Goodbye!")
                     break
 
-                # Status
                 if user_input.lower() == 'status':
                     self.show_status()
                     continue
 
-                # Tab management
+                if user_input.lower() == 'cache clear':
+                    if self.browser.cache:
+                        self.browser.cache.clear()
+                        print("✓ Cache cleared")
+                    continue
+
                 if user_input.lower() == 'tabs':
                     print(f"\n📑 Open Tabs ({len(self.browser.tabs)}):")
                     for t in self.browser.tabs:
                         active = "➜ " if t.id == self.browser.active_tab_id else "  "
-                        print(f"{active}Tab {t.id}: {t.title}")
+                        suspended = "[Suspended] " if t.is_suspended else ""
+                        print(f"{active}Tab {t.id}: {suspended}{t.title}")
                         print(f"     {t.url}")
                     continue
 
@@ -1143,7 +1467,6 @@ User: {message}"""
                         print("✗ Invalid tab ID")
                     continue
 
-                # Navigation
                 if user_input.lower() == 'back':
                     await self.browser.go_back()
                     print(f"✓ Went back to {tab.url}")
@@ -1159,7 +1482,6 @@ User: {message}"""
                     print("✓ Page reloaded")
                     continue
 
-                # Bookmarks
                 if user_input.lower().startswith('bookmark'):
                     if not tab:
                         print("✗ No active tab")
@@ -1179,18 +1501,16 @@ User: {message}"""
                             print(f"      Tags: {', '.join(b.tags)}")
                     continue
 
-                # History
                 if user_input.lower().startswith('history'):
                     query = user_input[7:].strip() if len(user_input) > 7 else ""
                     results = self.history.search_history(query, limit=20)
                     print(f"\n📜 History ({len(results)} results):")
-                    for item in results:
+                    for item in results[:10]:
                         print(f"  • {item['title']}")
                         print(f"    {item['url']}")
                         print(f"    Visited: {item['visit_time']} ({item['visit_count']} times)")
                     continue
 
-                # Find in page
                 if user_input.lower().startswith('find:'):
                     query = user_input[5:].strip()
                     matches = await self.browser.find_in_page(query)
@@ -1199,7 +1519,6 @@ User: {message}"""
                         print(f"  • {match[:100]}")
                     continue
 
-                # Settings
                 if user_input.lower() == 'settings':
                     settings = self.settings_manager.settings
                     print("\n⚙️  Settings:")
@@ -1207,25 +1526,24 @@ User: {message}"""
                     print(f"  Home Page: {settings.home_page}")
                     print(f"  Downloads: {settings.download_location}")
                     print(f"  Private Mode: {settings.private_mode}")
+                    print(f"  Cache Enabled: {settings.enable_cache}")
+                    print(f"  Max Content Length: {settings.max_content_length}")
                     print(f"  Block Popups: {settings.block_popups}")
                     print(f"  JavaScript: {settings.enable_javascript}")
                     print(f"  Theme: {settings.theme}")
                     continue
 
-                # Switch provider
                 if user_input.lower().startswith('use:'):
                     provider_name = user_input[4:].strip()
                     self.set_provider(provider_name)
                     continue
 
-                # Chat mode
                 if user_input.lower().startswith('chat:'):
                     message = user_input[5:].strip()
                     response = await self.chat(message)
                     print(f"\n🤖 {self.current_provider}:\n{response}")
                     continue
 
-                # Execute as natural language command
                 result = await self.execute_command(user_input)
                 print(f"\n{result}")
 
@@ -1237,16 +1555,15 @@ User: {message}"""
 
 async def main():
     """Main function"""
-    print("🚀 Initializing AI Browser with LM Studio support...")
+    print("🚀 Initializing Optimized AI Browser with LM Studio...")
 
     browser = AIBrowser()
 
     # Configure AI providers
-    # Priority 1: LM Studio (local)
     try:
         lm_studio_config = AIConfig(
             provider="lmstudio",
-            model="local-model",  # This can be changed in LM Studio
+            model="local-model",
             base_url=os.getenv("LM_STUDIO_URL", "http://localhost:1234/v1"),
             api_key="not-needed",
             supports_vision=False,
@@ -1257,7 +1574,6 @@ async def main():
     except Exception as e:
         print(f"⚠️  LM Studio not available: {e}")
 
-    # Optional: Anthropic Claude
     claude_api_key = os.getenv("ANTHROPIC_API_KEY")
     if claude_api_key and anthropic:
         try:
@@ -1274,7 +1590,6 @@ async def main():
         except Exception as e:
             print(f"⚠️  Claude not available: {e}")
 
-    # Optional: OpenAI GPT
     openai_api_key = os.getenv("OPENAI_API_KEY")
     if openai_api_key and openai:
         try:
@@ -1302,7 +1617,6 @@ async def main():
         print("  export OPENAI_API_KEY='your-key'")
         return
 
-    # Start browser
     await browser.start(headless=False)
 
     try:
